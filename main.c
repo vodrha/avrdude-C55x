@@ -289,6 +289,7 @@ int main(int argc, char * argv [])
   int     silentsafe;  /* Don't ask about fuses, 1=silent, 0=normal */
   int     init_ok;     /* Device initialization worked well */
   int     is_open;     /* Device open succeeded */
+  int     c55_sleepTime;
   unsigned char safemode_lfuse = 0xff;
   unsigned char safemode_hfuse = 0xff;
   unsigned char safemode_efuse = 0xff;
@@ -368,7 +369,7 @@ int main(int argc, char * argv [])
   silentsafe    = 0;       /* Ask by default */
   is_open       = 0;
   fileName      = NULL;
-
+  c55_sleepTime = 50;
   if (isatty(STDIN_FILENO) == 0)
       safemode  = 0;       /* Turn off safemode if this isn't a terminal */
 
@@ -416,7 +417,7 @@ int main(int argc, char * argv [])
   /*
    * process command line arguments
    */
-  while ((ch = getopt(argc,argv,"?b:B:c:C:DeE:f:Fi:np:OP:qstU:uvVx:yY:")) != -1) {
+  while ((ch = getopt(argc,argv,"?b:B:c:C:DeE:f:Fi:np:OP:qsS:tU:uvVx:yY:")) != -1) {
 
     switch (ch) {
       case 'b': /* override default programmer baud rate */
@@ -551,8 +552,17 @@ int main(int argc, char * argv [])
         exit(0);
         break;
 
-      case 'f': /* filename for c55xx */
+      case 'f': /* filename for C55xx */
         fileName = optarg;
+        break;
+
+      case 'S': /* C55xx sleeptime */
+        c55_sleepTime = strtol(optarg, &e, 10);
+        fprintf(stderr, "delay specified \n");
+        if ((e == optarg) || (*e != 0)) {
+          fprintf(stderr, "%s: invalid sleep time specified '%s'\n",progname, optarg);
+          exit(1);
+        }
         break;
 
       default:
@@ -1312,10 +1322,10 @@ int main(int argc, char * argv [])
 
 		  /* Set DTR and RTS to high */
 		  serial_set_dtr_rts(&fd, 1);
-		  usleep(50*1000);
+		  usleep(c55_sleepTime*1000);
 		  /* Clear DTR and RTS to unload the RESET capacitor */
 		  serial_set_dtr_rts(&fd, 0);
-		  usleep(50*1000);
+		  usleep(c55_sleepTime*1000);
 //#endif
 
           fprintf(stderr, "\nWaiting for the target...\n");
@@ -1323,7 +1333,7 @@ int main(int argc, char * argv [])
 		  /* Wait for 3 seconds */
 		  for(i=0; i<60; i++)
 		  {
-		      usleep(50*1000);
+		      usleep(c55_sleepTime*1000);
 		  }
 
           //serial_drain(&fd, 0);
@@ -1350,7 +1360,7 @@ int main(int argc, char * argv [])
 		  //serial_open(port, baudrate, &fd);
 		  serial_setspeed(&fd, baudrate);
 
-		  usleep(10*1000);
+		  usleep(c55_sleepTime*1000); //10
 #endif
 
           //fprintf(stderr, "\nReading ACK\n");
@@ -1371,9 +1381,44 @@ int main(int argc, char * argv [])
 			  fp = fopen(fileName, "rb");
 			  if(fp != NULL)
 			  {
+
+          //Find file length
+          fseek(fp, 0L, SEEK_END);
+          int fileSize = ftell(fp);
+          fseek(fp, 0L, SEEK_SET);
+          int32_t checkSum = 0;
+
+          //send file length
+          exitrc = serial_send(&fd, &fileSize, sizeof(fileSize));
+          fprintf(stderr, "File Size: %d\n", fileSize);
+          if(exitrc != 0)
+          {
+            fprintf(stderr, "\nData sending failed\n");
+
+            return exitrc;
+          }
+
+          exitrc = serial_recv(&fd, buf, 3);
+          if(exitrc != 0)
+          {
+            fprintf(stderr, "\nAcknowledgement not received\n");
+
+            return exitrc;
+          }
+
+          if (strcmp(buf, "OK") != 0)
+          {
+            fprintf(stderr, "\nAcknowledgement not OK\n");
+            exitrc = -1;
+            return exitrc;
+          }
 				  do
 				  {
 					  bytesRead = fread(buf, 1, 512, fp);
+            for (int i =0; i < bytesRead; i++) //increment checksum
+            {
+              checkSum += (buf[i] & 0x00FF);             
+            }
 
 					  exitrc = serial_send(&fd, buf, bytesRead);
 					  if(exitrc != 0)
@@ -1398,6 +1443,31 @@ int main(int argc, char * argv [])
 						  break;
 					  }
 				  }while(bytesRead == 512);
+
+          //Send computed checksum
+          exitrc = serial_send(&fd, &checkSum, sizeof(checkSum));
+          fprintf(stderr, "Checksum: %x\n", checkSum);
+          if(exitrc != 0)
+          {
+            fprintf(stderr, "\nData sending failed\n");
+
+            return exitrc;
+          }
+
+          exitrc = serial_recv(&fd, buf, 3);
+          if(exitrc != 0)
+          {
+            fprintf(stderr, "\nAcknowledgement not received\n");
+
+            return exitrc;
+          }
+
+          if (strcmp(buf, "OK") != 0)
+          {
+            fprintf(stderr, "\nAcknowledgement not OK\n");
+            exitrc = -1;
+            return exitrc;
+          }
 
 				  fprintf(stderr, "\nDone!!!\n");
 			  }
